@@ -10,27 +10,32 @@ export interface TranscriptionSegment {
 }
 
 export async function transcribeAudio(base64Audio: string, mimeType: string): Promise<TranscriptionSegment[]> {
-  const model = "gemini-3.1-pro-preview"; // Best for analysis
-  const response = await ai.models.generateContent({
-    model,
+  const model = ai.getGenerativeModel({ model: "gemini-1.5-flash" }); // Fast and reliable for transcription
+  const response = await model.generateContent({
     contents: [
       {
-        inlineData: {
-          data: base64Audio,
-          mimeType,
-        },
-      },
-      {
-        text: "Transcribe this audio precisely. Return a JSON array of objects, each containing 'startTime' (seconds), 'endTime' (seconds), and 'text'. Include 'speaker' if there are multiple people. Ensure the timestamps are as accurate as possible to the speech.",
+        role: 'user',
+        parts: [
+          {
+            inlineData: {
+              data: base64Audio,
+              mimeType,
+            },
+          },
+          {
+            text: "Transcribe this audio precisely. Return a JSON array of objects, each containing 'startTime' (seconds), 'endTime' (seconds), and 'text'. Include 'speaker' if there are multiple people. Ensure the timestamps are as accurate as possible to the speech.",
+          },
+        ],
       },
     ],
-    config: {
+    generationConfig: {
       responseMimeType: "application/json",
     },
   });
 
   try {
-    return JSON.parse(response.text || "[]");
+    const text = response.response.text();
+    return JSON.parse(text || "[]");
   } catch (e) {
     console.error("Failed to parse transcription JSON", e);
     return [];
@@ -56,28 +61,34 @@ export async function recreateSegment(
   duration: number,
   voiceId: VoiceID
 ): Promise<{ audioBase64: string }> {
-  const model = "gemini-3.1-flash-tts-preview"; 
+  // Use gemini-2.0-flash for high-speed audio generation
+  const model = ai.getGenerativeModel({ model: "gemini-2.0-flash" }); 
   
-  const response = await ai.models.generateContent({
-    model,
+  const response = await model.generateContent({
     contents: [
       {
-        text: `Generate audio for this text: "${text}". 
-        Voice Profile: ${voiceId}.
-        TARGET DURATION: Exactly ${duration.toFixed(2)} seconds.
-        Pacing must be adjusted to fit this time window exactly.
-        Return ONLY the audio data.`,
+        role: "user",
+        parts: [
+          {
+            text: `Generate speech for the following text: "${text}". 
+            Voice Profile: ${voiceId}.
+            The generated audio MUST be exactly ${duration.toFixed(2)} seconds long. 
+            Adjust pacing to fit this timeframe.
+            Respond with ONLY the generated audio.`,
+          },
+        ],
       },
     ],
-    config: {
+    generationConfig: {
       responseModalities: [Modality.AUDIO],
     },
   });
 
-  const audioPart = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+  const candidates = response.response.candidates;
+  const audioPart = candidates?.[0]?.content?.parts?.find(p => p.inlineData);
   
   if (!audioPart || !audioPart.inlineData) {
-    throw new Error("Segment generation failed");
+    throw new Error("Segment generation failed: No audio data returned");
   }
 
   return {
@@ -91,9 +102,7 @@ export async function recreateDialogue(
   speakerMapping: SpeakerMapping,
   editedSegments?: TranscriptionSegment[]
 ): Promise<{ audioBase64: string; mimeType: string }> {
-  // Legacy fallback for whole-file processing if needed, 
-  // but we prefer segment-by-segment in the UI now.
-  const model = "gemini-3.1-pro-preview"; 
+  const model = ai.getGenerativeModel({ model: "gemini-2.0-flash" }); 
   
   const mappingString = Object.entries(speakerMapping)
     .map(([speaker, voice]) => `${speaker} should use the '${voice}' voice profile`)
@@ -103,28 +112,33 @@ export async function recreateDialogue(
     ? `\n\nUSE THIS CORRECTED TRANSCRIPT AND TIMING AS THE SOURCE OF TRUTH:\n${JSON.stringify(editedSegments)}`
     : '';
   
-  const response = await ai.models.generateContent({
-    model,
+  const response = await model.generateContent({
     contents: [
       {
-        inlineData: {
-          data: base64Audio,
-          mimeType,
-        },
-      },
-      {
-        text: `Recreate this multi-person dialogue. ${mappingString}.${textReference}
-        CRITICAL REQUIREMENT: The output audio MUST match the original audio's duration and timing perfectly. 
-        Keep the exactly same pauses and speaking speed. Use the text provided in the transcript reference to ensure correct pronunciation.
-        Respond with ONLY the audio data. Ensure character voices are distinct according to the mapping.`,
+        role: 'user',
+        parts: [
+          {
+            inlineData: {
+              data: base64Audio,
+              mimeType,
+            },
+          },
+          {
+            text: `Recreate this multi-person dialogue. ${mappingString}.${textReference}
+            CRITICAL REQUIREMENT: The output audio MUST match the original audio's duration and timing perfectly. 
+            Keep the exactly same pauses and speaking speed. Use the provided text to ensure correct pronunciation.
+            Respond with ONLY the audio data.`,
+          },
+        ],
       },
     ],
-    config: {
+    generationConfig: {
       responseModalities: [Modality.AUDIO],
     },
   });
 
-  const audioPart = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+  const candidates = response.response.candidates;
+  const audioPart = candidates?.[0]?.content?.parts?.find(p => p.inlineData);
   
   if (!audioPart || !audioPart.inlineData) {
     throw new Error("No audio returned from Gemini");
