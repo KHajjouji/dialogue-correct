@@ -57,8 +57,8 @@ export async function recreateDialogue(
   speakerMapping: SpeakerMapping,
   editedSegments?: TranscriptionSegment[]
 ): Promise<{ audioBase64: string; mimeType: string }> {
-  // Use a model that supports audio output
-  const model = "gemini-3.1-flash-live-preview"; 
+  // Use a model that is available and supports multimodal tasks
+  const model = "gemini-3.1-pro-preview"; 
   
   const mappingString = Object.entries(speakerMapping)
     .map(([speaker, voice]) => `${speaker} should use the '${voice}' voice profile`)
