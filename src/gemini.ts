@@ -51,13 +51,48 @@ export interface SpeakerMapping {
   [speakerId: string]: VoiceID;
 }
 
+export async function recreateSegment(
+  text: string,
+  duration: number,
+  voiceId: VoiceID
+): Promise<{ audioBase64: string }> {
+  const model = "gemini-3.1-flash-tts-preview"; 
+  
+  const response = await ai.models.generateContent({
+    model,
+    contents: [
+      {
+        text: `Generate audio for this text: "${text}". 
+        Voice Profile: ${voiceId}.
+        TARGET DURATION: Exactly ${duration.toFixed(2)} seconds.
+        Pacing must be adjusted to fit this time window exactly.
+        Return ONLY the audio data.`,
+      },
+    ],
+    config: {
+      responseModalities: [Modality.AUDIO],
+    },
+  });
+
+  const audioPart = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+  
+  if (!audioPart || !audioPart.inlineData) {
+    throw new Error("Segment generation failed");
+  }
+
+  return {
+    audioBase64: audioPart.inlineData.data,
+  };
+}
+
 export async function recreateDialogue(
   base64Audio: string, 
   mimeType: string, 
   speakerMapping: SpeakerMapping,
   editedSegments?: TranscriptionSegment[]
 ): Promise<{ audioBase64: string; mimeType: string }> {
-  // Use a model that is available and supports multimodal tasks
+  // Legacy fallback for whole-file processing if needed, 
+  // but we prefer segment-by-segment in the UI now.
   const model = "gemini-3.1-pro-preview"; 
   
   const mappingString = Object.entries(speakerMapping)

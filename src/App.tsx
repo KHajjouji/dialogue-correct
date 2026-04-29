@@ -28,6 +28,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   transcribeAudio, 
+  recreateSegment,
   recreateDialogue, 
   TranscriptionSegment, 
   VOICE_PROFILES, 
@@ -41,6 +42,7 @@ export default function App() {
   const [segments, setSegments] = useState<TranscriptionSegment[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState<'idle' | 'transcribing' | 'recreating' | 'done' | 'error'>('idle');
+  const [processedCount, setProcessedCount] = useState(0);
   const [speakerMapping, setSpeakerMapping] = useState<SpeakerMapping>({});
   const [recreatedAudioUrl, setRecreatedAudioUrl] = useState<string | null>(null);
   const [originalAudioUrl, setOriginalAudioUrl] = useState<string | null>(null);
@@ -115,26 +117,103 @@ export default function App() {
       setIsProcessing(true);
       setError(null);
       setProgress('recreating');
+      setProcessedCount(0);
       
-      const { audioBase64, mimeType } = await recreateDialogue(
-        base64, 
-        file.type, 
-        speakerMapping, 
-        segments
-      );
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const decodedSegments: { buffer: AudioBuffer; start: number }[] = [];
+
+      // Process segments in batches to avoid rate limits but keep speed
+      const batchSize = 3;
+      for (let i = 0; i < segments.length; i += batchSize) {
+        const batch = segments.slice(i, i + batchSize);
+        const results = await Promise.all(batch.map(async (seg) => {
+          const voiceId = speakerMapping[seg.speaker || 'Unknown'] || 'Kore';
+          const duration = seg.endTime - seg.startTime;
+          const { audioBase64 } = await recreateSegment(seg.text, duration, voiceId);
+          
+          const arrayBuffer = b64toArrayBuffer(audioBase64);
+          const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+          return { buffer: audioBuffer, start: seg.startTime };
+        }));
+        
+        decodedSegments.push(...results);
+        setProcessedCount(prev => prev + batch.length);
+      }
+
+      // Assemble final audio
+      const totalDuration = Math.max(...segments.map(s => s.endTime));
+      const offlineCtx = new OfflineAudioContext(1, audioCtx.sampleRate * totalDuration, audioCtx.sampleRate);
       
-      const blob = b64toBlob(audioBase64, mimeType);
-      const url = URL.createObjectURL(blob);
+      decodedSegments.forEach(({ buffer, start }) => {
+        const source = offlineCtx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(offlineCtx.destination);
+        source.start(start);
+      });
+
+      const renderedBuffer = await offlineCtx.startRendering();
+      const wavBlob = audioBufferToWav(renderedBuffer);
+      const url = URL.createObjectURL(wavBlob);
+      
       setRecreatedAudioUrl(url);
-      
       setProgress('done');
     } catch (err: any) {
       console.error(err);
-      setError(err.message || "An error occurred during audio processing.");
+      setError(err.message || "Reconstruction failed.");
       setProgress('error');
     } finally {
       setIsProcessing(false);
     }
+  };
+
+  const b64toArrayBuffer = (b64: string) => {
+    const binary = atob(b64);
+    const len = binary.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes.buffer;
+  };
+
+  const audioBufferToWav = (buffer: AudioBuffer) => {
+    const length = buffer.length * buffer.numberOfChannels * 2 + 44;
+    const arrayBuffer = new ArrayBuffer(length);
+    const view = new DataView(arrayBuffer);
+    const channels = [];
+    let offset = 0;
+    let pos = 0;
+
+    const writeString = (s: string) => {
+      for (let i = 0; i < s.length; i++) view.setUint8(pos++, s.charCodeAt(i));
+    };
+
+    writeString('RIFF');
+    view.setUint32(pos, length - 8, true); pos += 4;
+    writeString('WAVE');
+    writeString('fmt ');
+    view.setUint32(pos, 16, true); pos += 4;
+    view.setUint16(pos, 1, true); pos += 2;
+    view.setUint16(pos, buffer.numberOfChannels, true); pos += 2;
+    view.setUint32(pos, buffer.sampleRate, true); pos += 4;
+    view.setUint32(pos, buffer.sampleRate * 2 * buffer.numberOfChannels, true); pos += 4;
+    view.setUint16(pos, buffer.numberOfChannels * 2, true); pos += 2;
+    view.setUint16(pos, 16, true); pos += 2;
+    writeString('data');
+    view.setUint32(pos, length - pos - 4, true); pos += 4;
+
+    for (let i = 0; i < buffer.numberOfChannels; i++) channels.push(buffer.getChannelData(i));
+
+    while (pos < length) {
+      for (let i = 0; i < buffer.numberOfChannels; i++) {
+        let sample = Math.max(-1, Math.min(1, channels[i][offset]));
+        sample = (sample < 0 ? sample * 0x8000 : sample * 0x7FFF) | 0;
+        view.setInt16(pos, sample, true);
+        pos += 2;
+      }
+      offset++;
+    }
+    return new Blob([arrayBuffer], { type: 'audio/wav' });
   };
 
   const updateSegmentText = (idx: number, newText: string) => {
@@ -311,7 +390,9 @@ export default function App() {
                 <span className="mono-label !text-[9px] text-slate-500 mb-1">Status</span>
                 <div className="flex items-center gap-2">
                   <div className={`w-2 h-2 rounded-full ${isProcessing ? 'bg-orange-500 animate-pulse' : 'bg-green-500'}`} />
-                  <span className="text-xs font-mono uppercase">{progress}</span>
+                  <span className="text-xs font-mono uppercase">
+                    {progress === 'recreating' ? `PHASE 2: ${processedCount}/${segments.length}` : progress}
+                  </span>
                 </div>
               </div>
               <div className="flex flex-col">
