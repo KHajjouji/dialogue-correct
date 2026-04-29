@@ -1,0 +1,6 @@
+{
+  "name": "Vocal Reconstructor",
+  "description": "Recreate dialogue from MP3 files with precise timing and AI voice generation using Gemini.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["audio_processing", "ai_voice_generation"]
+}
